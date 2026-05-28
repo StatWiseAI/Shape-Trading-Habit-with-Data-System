@@ -156,14 +156,21 @@ def color_val(v):
     return f"<span style='color:{color};font-weight:500'>{fmt(v)}</span>"
 
 def plotly_dark():
+    """Base layout — no xaxis/yaxis keys so callers can set them freely."""
     return dict(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#0D1B2A",
         font=dict(color="#B0BEC5", family="DM Sans"),
-        xaxis=dict(gridcolor="#1A2E45", zerolinecolor="#1A2E45"),
-        yaxis=dict(gridcolor="#1A2E45", zerolinecolor="#1A2E45"),
         margin=dict(l=40, r=40, t=40, b=40),
     )
+
+
+def _ax(fig, tickangle_x=0):
+    """Apply dark grid style to all axes."""
+    fig.update_xaxes(gridcolor="#1A2E45", zerolinecolor="#1A2E45",
+                     tickangle=tickangle_x)
+    fig.update_yaxes(gridcolor="#1A2E45", zerolinecolor="#1A2E45")
+    return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,6 +195,7 @@ def equity_curve_chart(equity, daily_pnl=None):
     fig.add_hline(y=0, line_dash="dash", line_color=GREY, line_width=1)
     fig.update_layout(**plotly_dark(), height=280,
                       title=dict(text="Equity Curve", font=dict(size=13)))
+    _ax(fig)
     return fig
 
 
@@ -203,6 +211,7 @@ def bar_chart(labels, values, title, height=280, color_by_sign=True):
     fig.update_layout(**plotly_dark(), height=height,
                       title=dict(text=title, font=dict(size=13)),
                       showlegend=False)
+    _ax(fig)
     return fig
 
 
@@ -223,6 +232,7 @@ def hold_time_chart(da):
     fig.update_layout(**plotly_dark(), height=240,
                       title=dict(text="Hold Time: Wins vs Losses (min)", font=dict(size=13)),
                       showlegend=False)
+    _ax(fig)
     return fig
 
 
@@ -245,6 +255,7 @@ def cusum_chart(cusum_data):
         fig.add_hline(y=-thr, line_dash="dash", line_color=GOLD, line_width=1)
     fig.update_layout(**plotly_dark(), height=260,
                       title=dict(text="CUSUM Regime Detection", font=dict(size=13)))
+    _ax(fig)
     return fig
 
 
@@ -274,6 +285,7 @@ def scatter_instruments(by_inst):
                       title=dict(text="Win Rate vs Profit Factor by Instrument",
                                  font=dict(size=13)),
                       coloraxis_colorbar=dict(title="Net PnL"))
+    _ax(fig)
     return fig
 
 
@@ -288,8 +300,8 @@ def daily_pnl_chart(daily_pnl):
     fig.add_hline(y=0, line_dash="dash", line_color=GREY, line_width=1)
     fig.update_layout(**plotly_dark(), height=260,
                       title=dict(text="Daily Net PnL", font=dict(size=13)),
-                      showlegend=False,
-                      xaxis=dict(tickangle=-45))
+                      showlegend=False)
+    _ax(fig, tickangle_x=-45)
     return fig
 
 
@@ -326,6 +338,7 @@ def bootstrap_ci_chart(boot_by_inst):
                       title=dict(text="Bootstrap 95% CI — Expectancy by Instrument",
                                  font=dict(size=13)),
                       xaxis_title="Expected PnL per trade ($)")
+    _ax(fig)
     return fig
 
 
@@ -781,7 +794,7 @@ def tab_raw(df):
             "entry_price": "{:,.2f}",
             "exit_price": "{:,.2f}",
             "duration_minutes": "{:.1f}",
-        }).applymap(
+        }).map(
             lambda v: f"color:{GREEN}" if v == "win" else
                       (f"color:{RED}" if v == "loss" else ""),
             subset=["outcome"],
@@ -839,10 +852,13 @@ Upload your broker export in the sidebar to get started.
         try:
             # Save upload to temp file (ingest needs a path)
             suffix = Path(uploaded.name).suffix
-            tmp    = Path(f"/tmp/upload{suffix}")
-            tmp.write_bytes(uploaded.read())
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
+                tf.write(uploaded.read())
+                tmp = Path(tf.name)
 
             result = ingest(tmp)
+            tmp.unlink(missing_ok=True)
             df_new = enrich(result.df)
 
         except Exception as e:
