@@ -1,32 +1,33 @@
 """
-app.py
-======
-Trading Analytics Platform — Streamlit entry point.
+app.py  —  Trading Analytics Platform
+======================================
+Streamlit entry point. Upload any CSV/XLSX broker export to get full
+descriptive + inferential analysis.
 
-Upload any CSV or XLSX trade export → full descriptive + inferential analysis.
-Supports 10+ brokers via auto-detection (NinjaTrader/Topstep is zero-config).
+Compatible with:
+  - Python 3.10 – 3.14
+  - pandas 2.x (no background_gradient / applymap)
+  - plotly 5.x  (no xaxis= in update_layout kwargs)
+  - Streamlit 1.35+
 
-Run locally:
-    streamlit run app.py
-
-Deploy:
-    Push to GitHub → connect to share.streamlit.io → set main file = app.py
+Run locally:   streamlit run app.py
+Deploy:        share.streamlit.io  →  main file = app.py
 """
 
-import io
-import json
-import warnings
+# ── std-lib first ─────────────────────────────────────────────────────────────
+import io, json, sys, tempfile, warnings
 from pathlib import Path
 
+warnings.filterwarnings("ignore")
+
+# ── third-party ───────────────────────────────────────────────────────────────
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-warnings.filterwarnings("ignore")
-
-# ── page config (must be first Streamlit call) ────────────────────────────────
+# ── page config  (MUST be the very first Streamlit call) ─────────────────────
 st.set_page_config(
     page_title="Trading Analytics Platform",
     page_icon="📊",
@@ -34,424 +35,397 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── ensure core package is importable when running from repo root ─────────────
-import sys
+# ── make core importable when running from repo root ─────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core.ingest      import ingest, IngestResult
+from core.ingest      import ingest
 from core.etl         import enrich
-from core.descriptive import build_summary, to_json
+from core.descriptive import build_summary, to_json, _json_safe
 from core.inferential import run_all
-from core.descriptive import _json_safe
 
-# ─────────────────────────────────────────────────────────────────────────────
-# THEME & CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-GREEN  = "#27AE60"
-RED    = "#E74C3C"
-GOLD   = "#F5A623"
-TEAL   = "#00C2CB"
-BLUE   = "#2980B9"
-GREY   = "#607D8B"
-BG     = "#0D1B2A"
+# ═════════════════════════════════════════════════════════════════════════════
+# THEME
+# ═════════════════════════════════════════════════════════════════════════════
+G   = "#27AE60"   # green / win
+R   = "#E74C3C"   # red   / loss
+GLD = "#F5A623"   # gold  / warning
+TEL = "#00C2CB"   # teal  / accent
+GRY = "#607D8B"   # grey  / neutral
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CUSTOM CSS
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-code, .metric-value { font-family: 'DM Mono', monospace; }
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background: #0D1B2A;
-    border-right: 1px solid #1A2E45;
-}
-section[data-testid="stSidebar"] * { color: #B0BEC5 !important; }
-section[data-testid="stSidebar"] h1,
-section[data-testid="stSidebar"] h2,
-section[data-testid="stSidebar"] h3 { color: #00C2CB !important; }
-
-/* Metric cards */
 [data-testid="metric-container"] {
-    background: #1A2E45;
-    border: 1px solid #223554;
-    border-radius: 8px;
-    padding: 12px 16px;
+    background:#1A2E45; border:1px solid #223554;
+    border-radius:8px; padding:12px 16px;
 }
-[data-testid="metric-container"] label { color: #607D8B !important; font-size: 11px !important; }
-[data-testid="metric-container"] [data-testid="stMetricValue"] {
-    font-family: 'DM Mono', monospace;
-    font-size: 22px !important;
+[data-testid="metric-container"] label {
+    color:#607D8B !important; font-size:11px !important;
 }
-
-/* Tabs */
-button[data-baseweb="tab"] {
-    font-family: 'DM Sans', sans-serif;
-    font-weight: 500;
-    font-size: 13px;
-}
-
-/* Dataframes */
-[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
-
-/* Headers */
-h1 { color: #FFFFFF !important; font-weight: 600; letter-spacing: -0.5px; }
-h2 { color: #E0E8F0 !important; font-weight: 500; }
-h3 { color: #B0BEC5 !important; font-weight: 500; font-size: 14px !important;
-     text-transform: uppercase; letter-spacing: 1px; }
-
-/* Dividers */
-hr { border-color: #1A2E45; }
-
-/* Badges */
-.badge-green { background:#0D2E1A; color:#27AE60; border:1px solid #27AE60;
-               padding:2px 10px; border-radius:20px; font-size:12px; font-weight:500; }
-.badge-red   { background:#2E0D0D; color:#E74C3C; border:1px solid #E74C3C;
-               padding:2px 10px; border-radius:20px; font-size:12px; font-weight:500; }
-.badge-amber { background:#2E1E00; color:#F5A623; border:1px solid #F5A623;
-               padding:2px 10px; border-radius:20px; font-size:12px; font-weight:500; }
-.badge-teal  { background:#002E2E; color:#00C2CB; border:1px solid #00C2CB;
-               padding:2px 10px; border-radius:20px; font-size:12px; font-weight:500; }
-.finding-card {
-    background: #1A2E45; border-left: 3px solid #E74C3C;
-    border-radius: 0 8px 8px 0; padding: 10px 14px;
-    margin-bottom: 8px; font-size: 13px; line-height: 1.6;
-}
-.finding-card.ok  { border-left-color: #27AE60; }
-.finding-card.warn{ border-left-color: #F5A623; }
-.finding-card.info{ border-left-color: #00C2CB; }
+section[data-testid="stSidebar"] { background:#0D1B2A; }
+h3 { color:#B0BEC5 !important; font-size:13px !important;
+     text-transform:uppercase; letter-spacing:1px; }
+hr { border-color:#1A2E45; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SAFE FORMATTERS
+# ═════════════════════════════════════════════════════════════════════════════
 
-def fmt(v, prefix="$", suffix="", dec=2):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
+def _f(v, pre="$", dec=2):
+    """Format a numeric value safely — returns '—' for None/NaN."""
+    try:
+        if v is None or (isinstance(v, float) and (np.isnan(v) or np.isinf(v))):
+            return "—"
+        return f"{pre}{v:,.{dec}f}"
+    except Exception:
         return "—"
-    return f"{prefix}{v:,.{dec}f}{suffix}"
 
-def pct(v, dec=1):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
+def _pct(v, dec=1):
+    try:
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "—"
+        return f"{v*100:.{dec}f}%"
+    except Exception:
         return "—"
-    return f"{v*100:.{dec}f}%"
 
-def sig_badge(p):
+def _sig(p):
+    """Significance stars."""
     if p is None: return ""
-    if p < 0.001: return "🔴 ***"
-    if p < 0.01:  return "🟠 **"
-    if p < 0.05:  return "🟡 *"
-    if p < 0.10:  return "⚪ ."
-    return "✅ ns"
+    try:
+        if p < 0.001: return "★★★"
+        if p < 0.01:  return "★★"
+        if p < 0.05:  return "★"
+        if p < 0.10:  return "·"
+        return "ns"
+    except Exception:
+        return ""
 
-def color_val(v):
-    if v is None: return "—"
-    color = GREEN if v > 0 else (RED if v < 0 else GREY)
-    return f"<span style='color:{color};font-weight:500'>{fmt(v)}</span>"
+def _safe_float(v):
+    try:
+        f = float(v)
+        return None if (np.isnan(f) or np.isinf(f)) else f
+    except Exception:
+        return None
 
-def plotly_dark():
-    """Base layout — no xaxis/yaxis keys so callers can set them freely."""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PLOTLY BASE  —  no xaxis/yaxis keys (avoids kwarg collision in plotly 5.x)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _base_layout(height=300, title=""):
     return dict(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#0D1B2A",
-        font=dict(color="#B0BEC5", family="DM Sans"),
-        margin=dict(l=40, r=40, t=40, b=40),
+        font=dict(color="#B0BEC5", family="sans-serif", size=12),
+        margin=dict(l=50, r=120, t=45, b=45),
+        height=height,
+        title=dict(text=title, font=dict(size=13), x=0),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
     )
 
-
-def _ax(fig, tickangle_x=0):
-    """Apply dark grid style to all axes."""
-    fig.update_xaxes(gridcolor="#1A2E45", zerolinecolor="#1A2E45",
-                     tickangle=tickangle_x)
-    fig.update_yaxes(gridcolor="#1A2E45", zerolinecolor="#1A2E45")
+def _style_axes(fig, x_tickangle=0):
+    """Apply grid/zero-line style via update_xaxes/update_yaxes — never via layout."""
+    fig.update_xaxes(
+        gridcolor="#1A2E45", zerolinecolor="#1A2E45",
+        tickangle=x_tickangle, tickfont=dict(size=11),
+    )
+    fig.update_yaxes(
+        gridcolor="#1A2E45", zerolinecolor="#1A2E45",
+        tickfont=dict(size=11),
+    )
     return fig
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CHARTS
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# CHART BUILDERS
+# ═════════════════════════════════════════════════════════════════════════════
 
-def equity_curve_chart(equity, daily_pnl=None):
+def chart_equity(equity: list) -> go.Figure:
     x = list(range(1, len(equity) + 1))
-    colors = [GREEN if v >= 0 else RED for v in
-              [equity[0]] + [equity[i]-equity[i-1] for i in range(1, len(equity))]]
-
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=x, y=equity, mode="lines",
-        line=dict(color=TEAL, width=2),
-        fill="tozeroy",
-        fillcolor="rgba(0,194,203,0.08)",
-        name="Equity curve",
+        x=x, y=equity, mode="lines", name="Equity",
+        line=dict(color=TEL, width=2),
+        fill="tozeroy", fillcolor="rgba(0,194,203,0.07)",
         hovertemplate="Trade %{x}<br>Net PnL: $%{y:,.0f}<extra></extra>",
     ))
-    # Zero line
-    fig.add_hline(y=0, line_dash="dash", line_color=GREY, line_width=1)
-    fig.update_layout(**plotly_dark(), height=280,
-                      title=dict(text="Equity Curve", font=dict(size=13)))
-    _ax(fig)
-    return fig
+    fig.add_hline(y=0, line_dash="dash", line_color=GRY, line_width=1)
+    fig.update_layout(**_base_layout(280, "Equity Curve"), showlegend=False)
+    return _style_axes(fig)
 
 
-def bar_chart(labels, values, title, height=280, color_by_sign=True):
-    colors = [GREEN if v >= 0 else RED for v in values] if color_by_sign \
-             else [TEAL] * len(values)
+def chart_bars(labels: list, values: list, title: str,
+               height=280, color_sign=True, x_tickangle=0) -> go.Figure:
+    colors = [G if v >= 0 else R for v in values] if color_sign else [TEL]*len(values)
     fig = go.Figure(go.Bar(
-        x=labels, y=values,
-        marker_color=colors,
+        x=labels, y=values, marker_color=colors,
         hovertemplate="%{x}<br>$%{y:,.0f}<extra></extra>",
     ))
-    fig.add_hline(y=0, line_dash="dash", line_color=GREY, line_width=1)
-    fig.update_layout(**plotly_dark(), height=height,
-                      title=dict(text=title, font=dict(size=13)),
-                      showlegend=False)
-    _ax(fig)
-    return fig
+    fig.add_hline(y=0, line_dash="dash", line_color=GRY, line_width=1)
+    fig.update_layout(**_base_layout(height, title), showlegend=False)
+    return _style_axes(fig, x_tickangle=x_tickangle)
 
 
-def hold_time_chart(da):
-    wins_mean   = (da.get("wins") or {}).get("mean")
-    losses_mean = (da.get("losses") or {}).get("mean")
-    wins_med    = (da.get("wins") or {}).get("median")
-    losses_med  = (da.get("losses") or {}).get("median")
-    if not any([wins_mean, losses_mean]): return None
-    cats = ["Wins — Mean", "Wins — Median", "Losses — Mean", "Losses — Median"]
-    vals = [wins_mean or 0, wins_med or 0, losses_mean or 0, losses_med or 0]
-    cols = [GREEN, GREEN, RED, RED]
+def chart_daily(daily_pnl: dict) -> go.Figure:
+    dates  = list(daily_pnl.keys())
+    values = []
+    for v in daily_pnl.values():
+        try:
+            f = float(v)
+            values.append(0.0 if (np.isnan(f) or np.isinf(f)) else f)
+        except Exception:
+            values.append(0.0)
+    return chart_bars(dates, values, "Daily Net PnL", height=260, x_tickangle=-45)
+
+
+def chart_hold_time(da: dict) -> go.Figure | None:
+    wins_m  = _safe_float((da.get("wins")   or {}).get("mean"))
+    wins_md = _safe_float((da.get("wins")   or {}).get("median"))
+    loss_m  = _safe_float((da.get("losses") or {}).get("mean"))
+    loss_md = _safe_float((da.get("losses") or {}).get("median"))
+    if not any([wins_m, loss_m]):
+        return None
+    cats = ["Wins · Mean", "Wins · Median", "Losses · Mean", "Losses · Median"]
+    vals = [wins_m or 0, wins_md or 0, loss_m or 0, loss_md or 0]
+    cols = [G, G, R, R]
     fig = go.Figure(go.Bar(
-        x=vals, y=cats, orientation="h",
-        marker_color=cols,
+        x=vals, y=cats, orientation="h", marker_color=cols,
         hovertemplate="%{y}: %{x:.1f} min<extra></extra>",
     ))
-    fig.update_layout(**plotly_dark(), height=240,
-                      title=dict(text="Hold Time: Wins vs Losses (min)", font=dict(size=13)),
+    fig.update_layout(**_base_layout(240, "Hold Time — Wins vs Losses (min)"),
                       showlegend=False)
-    _ax(fig)
-    return fig
+    return _style_axes(fig)
 
 
-def cusum_chart(cusum_data):
-    pos = cusum_data.get("cusum_pos", [])
-    neg = cusum_data.get("cusum_neg", [])
-    thr = cusum_data.get("threshold_used", 0)
-    if not pos: return None
-    x = list(range(1, len(pos) + 1))
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=pos, mode="lines",
-        line=dict(color=GREEN, width=1.5), name="CUSUM+",
-        hovertemplate="Trade %{x}<br>%{y:.0f}<extra></extra>"))
-    fig.add_trace(go.Scatter(x=x, y=neg, mode="lines",
-        line=dict(color=RED, width=1.5), name="CUSUM−",
-        fill="tozeroy", fillcolor="rgba(231,76,60,0.08)",
-        hovertemplate="Trade %{x}<br>%{y:.0f}<extra></extra>"))
-    if thr:
-        fig.add_hline(y=thr,  line_dash="dash", line_color=GOLD, line_width=1)
-        fig.add_hline(y=-thr, line_dash="dash", line_color=GOLD, line_width=1)
-    fig.update_layout(**plotly_dark(), height=260,
-                      title=dict(text="CUSUM Regime Detection", font=dict(size=13)))
-    _ax(fig)
-    return fig
-
-
-def scatter_instruments(by_inst):
+def chart_scatter_inst(by_inst: dict) -> go.Figure | None:
     rows = []
     for inst, b in by_inst.items():
-        if not b or b.get("n_trades", 0) < 3: continue
+        if not b or (b.get("n_trades") or 0) < 3:
+            continue
         rows.append({
             "Instrument": inst,
-            "Win Rate %":  round((b.get("win_rate") or 0) * 100, 1),
-            "Profit Factor": b.get("profit_factor") or 0,
-            "n_trades":    b.get("n_trades", 0),
-            "Total PnL":   b.get("total_net_pnl", 0),
+            "Win Rate %": round((_safe_float(b.get("win_rate")) or 0) * 100, 1),
+            "Profit Factor": _safe_float(b.get("profit_factor")) or 0,
+            "n": b.get("n_trades", 1),
+            "PnL": _safe_float(b.get("total_net_pnl")) or 0,
         })
-    if not rows: return None
+    if not rows:
+        return None
     df_s = pd.DataFrame(rows)
-    fig = px.scatter(df_s, x="Win Rate %", y="Profit Factor",
-                     size="n_trades", color="Total PnL",
-                     text="Instrument",
-                     color_continuous_scale=[[0,"#E74C3C"],[0.5,"#607D8B"],[1,"#27AE60"]],
-                     size_max=40, height=320)
-    fig.add_hline(y=1, line_dash="dash", line_color=GREY, line_width=1)
-    fig.add_vline(x=50, line_dash="dash", line_color=GREY, line_width=1)
+    fig = px.scatter(
+        df_s, x="Win Rate %", y="Profit Factor",
+        size="n", color="PnL", text="Instrument",
+        color_continuous_scale=[[0, R], [0.5, GRY], [1, G]],
+        size_max=40, height=320,
+    )
+    fig.add_hline(y=1,  line_dash="dash", line_color=GRY, line_width=1)
+    fig.add_vline(x=50, line_dash="dash", line_color=GRY, line_width=1)
     fig.update_traces(textposition="top center",
                       textfont=dict(color="#FFFFFF", size=11))
-    fig.update_layout(**plotly_dark(),
-                      title=dict(text="Win Rate vs Profit Factor by Instrument",
-                                 font=dict(size=13)),
-                      coloraxis_colorbar=dict(title="Net PnL"))
-    _ax(fig)
-    return fig
+    fig.update_layout(
+        **_base_layout(320, "Win Rate vs Profit Factor by Instrument"),
+        coloraxis_colorbar=dict(title="Net PnL", tickfont=dict(size=10)),
+    )
+    return _style_axes(fig)
 
 
-def daily_pnl_chart(daily_pnl):
-    dates  = list(daily_pnl.keys())
-    values = list(daily_pnl.values())
-    colors = [GREEN if v >= 0 else RED for v in values]
-    fig = go.Figure(go.Bar(
-        x=dates, y=values, marker_color=colors,
-        hovertemplate="%{x}<br>$%{y:,.0f}<extra></extra>",
+def chart_cusum(cusum: dict) -> go.Figure | None:
+    pos = cusum.get("cusum_pos", [])
+    neg = cusum.get("cusum_neg", [])
+    if not pos:
+        return None
+    thr = _safe_float(cusum.get("threshold_used")) or 0
+    x = list(range(1, len(pos) + 1))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=pos, mode="lines", name="CUSUM+",
+        line=dict(color=G, width=1.5),
+        hovertemplate="Trade %{x}<br>%{y:.0f}<extra></extra>",
     ))
-    fig.add_hline(y=0, line_dash="dash", line_color=GREY, line_width=1)
-    fig.update_layout(**plotly_dark(), height=260,
-                      title=dict(text="Daily Net PnL", font=dict(size=13)),
-                      showlegend=False)
-    _ax(fig, tickangle_x=-45)
-    return fig
+    fig.add_trace(go.Scatter(
+        x=x, y=neg, mode="lines", name="CUSUM−",
+        line=dict(color=R, width=1.5),
+        fill="tozeroy", fillcolor="rgba(231,76,60,0.08)",
+        hovertemplate="Trade %{x}<br>%{y:.0f}<extra></extra>",
+    ))
+    if thr:
+        fig.add_hline(y= thr, line_dash="dash", line_color=GLD, line_width=1)
+        fig.add_hline(y=-thr, line_dash="dash", line_color=GLD, line_width=1)
+    fig.update_layout(**_base_layout(260, "CUSUM Regime Detection"))
+    return _style_axes(fig)
 
 
-def bootstrap_ci_chart(boot_by_inst):
+def chart_bootstrap_ci(boot_by_inst: dict) -> go.Figure | None:
     rows = []
     for inst, b in boot_by_inst.items():
-        if not b or "estimate" not in b or b["estimate"] is None: continue
-        rows.append({
-            "inst":  inst,
-            "est":   b["estimate"],
-            "lo":    b.get("ci_lo") or 0,
-            "hi":    b.get("ci_hi") or 0,
-            "sig":   b.get("significant", False),
-        })
-    if not rows: return None
+        if not b or b.get("estimate") is None:
+            continue
+        est = _safe_float(b.get("estimate"))
+        lo  = _safe_float(b.get("ci_lo"))
+        hi  = _safe_float(b.get("ci_hi"))
+        if est is None or lo is None or hi is None:
+            continue
+        rows.append({"inst": inst, "est": est, "lo": lo, "hi": hi})
+    if not rows:
+        return None
     rows.sort(key=lambda r: r["est"])
     fig = go.Figure()
     for r in rows:
-        color = GREEN if r["est"] > 0 else RED
+        col = G if r["est"] > 0 else R
         fig.add_trace(go.Scatter(
             x=[r["lo"], r["hi"]], y=[r["inst"], r["inst"]],
-            mode="lines", line=dict(color=color, width=6),
+            mode="lines", line=dict(color=col, width=7),
             showlegend=False,
             hovertemplate=f"{r['inst']}: CI [{r['lo']:.1f}, {r['hi']:.1f}]<extra></extra>",
         ))
         fig.add_trace(go.Scatter(
             x=[r["est"]], y=[r["inst"]], mode="markers",
-            marker=dict(color=color, size=12, symbol="diamond"),
+            marker=dict(color=col, size=12, symbol="diamond"),
             showlegend=False,
-            hovertemplate=f"{r['inst']}: estimate ${r['est']:.1f}<extra></extra>",
+            hovertemplate=f"{r['inst']}: ${r['est']:.1f}<extra></extra>",
         ))
-    fig.add_vline(x=0, line_dash="dash", line_color=GREY, line_width=1.5)
-    fig.update_layout(**plotly_dark(), height=300,
-                      title=dict(text="Bootstrap 95% CI — Expectancy by Instrument",
-                                 font=dict(size=13)),
-                      xaxis_title="Expected PnL per trade ($)")
-    _ax(fig)
+    fig.add_vline(x=0, line_dash="dash", line_color=GRY, line_width=1.5)
+    fig.update_layout(**_base_layout(300, "Bootstrap 95% CI — Expectancy by Instrument"))
+    fig.update_xaxes(gridcolor="#1A2E45", zerolinecolor="#1A2E45",
+                     title_text="Expected PnL per trade ($)", tickfont=dict(size=11))
+    fig.update_yaxes(gridcolor="#1A2E45", zerolinecolor="#1A2E45", tickfont=dict(size=11))
     return fig
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SAFE DATAFRAME STYLING  —  no background_gradient, no applymap
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _colour_pnl_col(col: pd.Series) -> list:
+    """Return list of CSS strings colouring each cell by sign. No matplotlib."""
+    out = []
+    for v in col:
+        try:
+            fv = float(v)
+            if np.isnan(fv) or np.isinf(fv):
+                out.append("")
+            elif fv > 0:
+                out.append("background-color:#0D2E1A; color:#27AE60")
+            elif fv < 0:
+                out.append("background-color:#2E0D0D; color:#E74C3C")
+            else:
+                out.append("")
+        except Exception:
+            out.append("")
+    return out
+
+def _colour_outcome_col(col: pd.Series) -> list:
+    """Colour the outcome column strings."""
+    out = []
+    for v in col:
+        s = str(v).lower()
+        if s == "win":
+            out.append("color:#27AE60; font-weight:500")
+        elif s == "loss":
+            out.append("color:#E74C3C; font-weight:500")
+        else:
+            out.append("")
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
 
 def render_sidebar():
     with st.sidebar:
         st.markdown("## 📊 Trading Analytics")
         st.markdown("---")
-
         uploaded = st.file_uploader(
             "Upload trade export",
             type=["csv", "xlsx", "xls"],
-            help="Supports NinjaTrader/Topstep, Interactive Brokers, Tradovate, "
-                 "TradeStation, Tastytrade, MetaTrader, Rithmic/Apex, Binance, Kraken, Webull.",
+            help=(
+                "Auto-detects: NinjaTrader/Topstep, Interactive Brokers, "
+                "Tradovate, TradeStation, Tastytrade, MetaTrader 4/5, "
+                "Rithmic/Apex, Binance, Kraken, Webull."
+            ),
         )
-
         st.markdown("---")
         st.markdown("### ⚙️ Options")
         run_inf = st.checkbox(
             "Run inferential tests",
             value=True,
-            help="Bootstrap CIs, MWU, KS, Ljung-Box, CUSUM, runs test, permutation tests. "
-                 "Adds ~5 seconds for large datasets.",
+            help="10 tests: bootstrap CIs, MWU, KS, Ljung-Box, CUSUM, runs. ~5 sec.",
         )
-        merge_files = st.checkbox(
+        merge = st.checkbox(
             "Merge with previous upload",
             value=False,
-            help="Combine this file with the previously uploaded file before analysis.",
+            help="Combines this file with the previously uploaded file.",
         )
-
         st.markdown("---")
-        st.markdown("### 📁 Multiple files")
-        st.caption("To combine files: upload file 1, tick 'Merge with previous upload', then upload file 2.")
-
-        st.markdown("---")
-        st.markdown(
-            "<div style='font-size:11px;color:#3D5A73'>"
-            "Trading Analytics Platform<br>"
-            "Steps 1 · 2a · 2b complete<br>"
-            "Step 3 (Streamlit app) ✓<br><br>"
-            "Built on 199 live Topstep trades<br>"
-            "Apr–May 2026"
-            "</div>",
-            unsafe_allow_html=True,
+        st.caption(
+            "Trading Analytics Platform  \n"
+            "Steps 1 · 2a · 2b · 3 complete  \n"
+            "Built on 199 live Topstep trades"
         )
+    return uploaded, run_inf, merge
 
-    return uploaded, run_inf, merge_files
 
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 1 — OVERVIEW
+# ═════════════════════════════════════════════════════════════════════════════
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────────────────────────────────────
+def tab_overview(summary: dict, df: pd.DataFrame):
+    ov = summary.get("overall", {})
+    me = summary.get("meta", {})
+    da = summary.get("duration_analysis", {})
+    fa = summary.get("fee_analysis", {})
+    ra = summary.get("run_analysis", {})
 
-def tab_overview(summary, df):
-    ov = summary["overall"]
-    me = summary["meta"]
-    da = summary["duration_analysis"]
-    fa = summary["fee_analysis"]
-    ra = summary["run_analysis"]
-
-    # ── key metrics row ───────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    total = ov.get("total_net_pnl") or 0
-    c1.metric("Total Net PnL",  fmt(total),
-              delta=None, delta_color="off")
-    c2.metric("Win Rate",        pct(ov.get("win_rate")))
-    c3.metric("Expectancy",      fmt(ov.get("expectancy_usd")),
-              delta=None, delta_color="off")
-    c4.metric("Profit Factor",   f"{ov.get('profit_factor') or 0:.3f}")
-    c5.metric("Sharpe Ratio",    f"{ov.get('sharpe') or 0:.3f}")
-    c6.metric("Max Drawdown",    fmt(ov.get("max_dd_usd")),
-              delta=None, delta_color="off")
+    # Row 1 — primary KPIs
+    c = st.columns(6)
+    c[0].metric("Total Net PnL",   _f(ov.get("total_net_pnl")))
+    c[1].metric("Win Rate",        _pct(ov.get("win_rate")))
+    c[2].metric("Expectancy",      _f(ov.get("expectancy_usd")))
+    c[3].metric("Profit Factor",   _f(ov.get("profit_factor"), pre="", dec=3))
+    c[4].metric("Sharpe Ratio",    _f(ov.get("sharpe"), pre="", dec=3))
+    c[5].metric("Max Drawdown",    _f(ov.get("max_dd_usd")))
 
     st.markdown("---")
 
+    # Charts row
     col_l, col_r = st.columns([3, 2])
-
     with col_l:
         eq = summary.get("equity_curve", [])
         if eq:
-            st.plotly_chart(equity_curve_chart(eq), use_container_width=True)
-
+            st.plotly_chart(chart_equity(eq), use_container_width=True)
     with col_r:
-        daily = summary.get("daily_pnl", {})
-        if daily:
-            st.plotly_chart(daily_pnl_chart(daily), use_container_width=True)
+        dp = summary.get("daily_pnl", {})
+        if dp:
+            st.plotly_chart(chart_daily(dp), use_container_width=True)
 
-    # ── secondary metrics ─────────────────────────────────────────────────────
     st.markdown("---")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Trades",         ov.get("n_trades"))
-    c2.metric("Trading Days",   me.get("trading_days"))
-    c3.metric("Avg Win",        fmt(ov.get("avg_win")))
-    c4.metric("Avg Loss",       fmt(ov.get("avg_loss")))
-    c5.metric("Fee Drag",       fmt(fa.get("total_cost")))
-    c6.metric("Max Win Streak", ra.get("max_win_streak"))
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Gross Profit",    fmt(ov.get("gross_profit")))
-    c2.metric("Gross Loss",      fmt(ov.get("gross_loss")))
-    c3.metric("Skewness",        f"{ov.get('skewness') or 0:.3f}")
-    c4.metric("Kurtosis",        f"{ov.get('kurtosis') or 0:.3f}")
-    c5.metric("Max Loss Streak", ra.get("max_loss_streak"))
-    ratio = da.get("loss_to_win_hold_ratio")
-    c6.metric("Hold Asymmetry",
-              f"{ratio:.2f}×" if ratio else "—",
-              delta="losses held longer" if ratio and ratio > 1.2 else None,
-              delta_color="inverse")
+    # Row 2 — secondary KPIs
+    c = st.columns(6)
+    c[0].metric("Trades",          ov.get("n_trades", "—"))
+    c[1].metric("Trading Days",    me.get("trading_days", "—"))
+    c[2].metric("Avg Win",         _f(ov.get("avg_win")))
+    c[3].metric("Avg Loss",        _f(ov.get("avg_loss")))
+    c[4].metric("Fee Drag",        _f(fa.get("total_cost")))
+    c[5].metric("Best Trade",      _f(ov.get("best_trade")))
 
-    # ── period info ───────────────────────────────────────────────────────────
+    c = st.columns(6)
+    c[0].metric("Gross Profit",    _f(ov.get("gross_profit")))
+    c[1].metric("Gross Loss",      _f(ov.get("gross_loss")))
+    c[2].metric("Skewness",        _f(ov.get("skewness"), pre="", dec=3))
+    c[3].metric("Kurtosis",        _f(ov.get("kurtosis"), pre="", dec=3))
+    c[4].metric("Max Win Streak",  ra.get("max_win_streak", "—"))
+    ratio = _safe_float(da.get("loss_to_win_hold_ratio"))
+    c[5].metric(
+        "Hold Asymmetry",
+        f"{ratio:.2f}×" if ratio else "—",
+        delta="losses held longer" if ratio and ratio > 1.2 else None,
+        delta_color="inverse",
+    )
+
     st.markdown("---")
     st.caption(
         f"Period: **{me.get('data_from')}** → **{me.get('data_to')}**  ·  "
@@ -460,445 +434,582 @@ def tab_overview(summary, df):
     )
 
 
-def tab_instruments(summary):
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 2 — INSTRUMENTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def tab_instruments(summary: dict):
     by_inst = summary.get("by_instrument", {})
     if not by_inst:
-        st.info("No instrument breakdown available.")
+        st.info("No instrument data available.")
         return
 
     # Scatter
-    fig = scatter_instruments(by_inst)
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
+    fig_sc = chart_scatter_inst(by_inst)
+    if fig_sc:
+        st.plotly_chart(fig_sc, use_container_width=True)
 
-    # Bar chart net PnL
+    # Bar — sorted by PnL
     insts  = list(by_inst.keys())
-    totals = [by_inst[i].get("total_net_pnl", 0) or 0 for i in insts]
+    totals = [_safe_float((by_inst[i] or {}).get("total_net_pnl")) or 0 for i in insts]
     order  = sorted(range(len(totals)), key=lambda x: totals[x])
     st.plotly_chart(
-        bar_chart([insts[i] for i in order], [totals[i] for i in order],
-                  "Net PnL by Instrument"),
+        chart_bars([insts[i] for i in order], [totals[i] for i in order],
+                   "Net PnL by Instrument"),
         use_container_width=True,
     )
 
-    # Table
+    # Table — pure styling, no matplotlib
     rows = []
     for inst, b in by_inst.items():
-        if not b: continue
+        if not b:
+            continue
         rows.append({
             "Instrument":    inst,
             "Trades":        b.get("n_trades"),
-            "Net PnL":       b.get("total_net_pnl"),
-            "Win Rate":      pct(b.get("win_rate")),
-            "Profit Factor": b.get("profit_factor"),
-            "Avg Win":       b.get("avg_win"),
-            "Avg Loss":      b.get("avg_loss"),
-            "Sharpe":        b.get("sharpe"),
-            "Max DD ($)":    b.get("max_dd_usd"),
-            "Skewness":      b.get("skewness"),
+            "Net PnL":       _safe_float(b.get("total_net_pnl")),
+            "Win Rate":      _pct(b.get("win_rate")),
+            "Profit Factor": _safe_float(b.get("profit_factor")),
+            "Avg Win ($)":   _safe_float(b.get("avg_win")),
+            "Avg Loss ($)":  _safe_float(b.get("avg_loss")),
+            "Sharpe":        _safe_float(b.get("sharpe")),
+            "Max DD ($)":    _safe_float(b.get("max_dd_usd")),
+            "Skewness":      _safe_float(b.get("skewness")),
         })
+    if not rows:
+        return
+
     df_t = pd.DataFrame(rows).sort_values("Net PnL", ascending=False)
-    st.dataframe(
-        df_t.style.format({
-            "Net PnL": "${:,.2f}",
-            "Profit Factor": "{:.3f}",
-            "Avg Win": "${:,.2f}",
-            "Avg Loss": "${:,.2f}",
-            "Sharpe": "{:.3f}",
-            "Max DD ($)": "${:,.2f}",
-            "Skewness": "{:.3f}",
-        }).background_gradient(subset=["Net PnL"], cmap="RdYlGn"),
-        use_container_width=True, hide_index=True,
+
+    # Safe number formatting — convert None to NaN first
+    fmt_cols = {
+        "Net PnL": "${:,.2f}", "Profit Factor": "{:.3f}",
+        "Avg Win ($)": "${:,.2f}", "Avg Loss ($)": "${:,.2f}",
+        "Sharpe": "{:.3f}", "Max DD ($)": "${:,.2f}", "Skewness": "{:.3f}",
+    }
+    # Fill None → NaN for formatting
+    for col in fmt_cols:
+        if col in df_t.columns:
+            df_t[col] = pd.to_numeric(df_t[col], errors="coerce")
+
+    styled = (
+        df_t.style
+        .format(fmt_cols, na_rep="—")
+        .apply(_colour_pnl_col, subset=["Net PnL"])
     )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def tab_timing(summary):
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 3 — TIMING
+# ═════════════════════════════════════════════════════════════════════════════
+
+def tab_timing(summary: dict):
     col_l, col_r = st.columns(2)
 
-    # By day
+    # Day of week
     with col_l:
         by_day = summary.get("by_day_of_week", {})
         day_order = ["Monday","Tuesday","Wednesday","Thursday","Friday"]
         days   = [d for d in day_order if d in by_day]
-        d_vals = [by_day[d].get("total_net_pnl", 0) or 0 for d in days]
-        d_wr   = [pct(by_day[d].get("win_rate")) for d in days]
-        st.plotly_chart(bar_chart(days, d_vals, "Net PnL by Day of Week"),
+        d_vals = [_safe_float((by_day[d] or {}).get("total_net_pnl")) or 0 for d in days]
+        st.plotly_chart(chart_bars(days, d_vals, "Net PnL by Day of Week"),
                         use_container_width=True)
-
         df_day = pd.DataFrame({
-            "Day": days, "Net PnL": d_vals,
-            "Win Rate": d_wr,
-            "Trades": [by_day[d].get("n_trades") for d in days],
+            "Day":     days,
+            "Net PnL": d_vals,
+            "Win Rate": [_pct((by_day[d] or {}).get("win_rate")) for d in days],
+            "Trades":  [(by_day[d] or {}).get("n_trades") for d in days],
+            "PF":      [_safe_float((by_day[d] or {}).get("profit_factor")) for d in days],
         })
-        st.dataframe(df_day.style.format({"Net PnL": "${:,.2f}"}),
-                     use_container_width=True, hide_index=True)
+        df_day["Net PnL"] = pd.to_numeric(df_day["Net PnL"], errors="coerce")
+        df_day["PF"]      = pd.to_numeric(df_day["PF"],      errors="coerce")
+        st.dataframe(
+            df_day.style
+            .format({"Net PnL": "${:,.2f}", "PF": "{:.3f}"}, na_rep="—")
+            .apply(_colour_pnl_col, subset=["Net PnL"]),
+            use_container_width=True, hide_index=True,
+        )
 
-    # By hour
+    # Hour bin
     with col_r:
         by_hr = summary.get("by_hour_bin", {})
         hours  = sorted(by_hr.keys())
-        h_vals = [by_hr[h].get("total_net_pnl", 0) or 0 for h in hours]
-        st.plotly_chart(bar_chart(hours, h_vals, "Net PnL by Hour Bin (entry time)"),
+        h_vals = [_safe_float((by_hr[h] or {}).get("total_net_pnl")) or 0 for h in hours]
+        st.plotly_chart(chart_bars(hours, h_vals, "Net PnL by Hour Bin"),
                         use_container_width=True)
-
         df_hr = pd.DataFrame({
-            "Hour (local)": hours, "Net PnL": h_vals,
-            "Win Rate": [pct(by_hr[h].get("win_rate")) for h in hours],
-            "Trades": [by_hr[h].get("n_trades") for h in hours],
-            "PF": [by_hr[h].get("profit_factor") for h in hours],
+            "Hour":    hours,
+            "Net PnL": h_vals,
+            "Win Rate":[_pct((by_hr[h] or {}).get("win_rate")) for h in hours],
+            "Trades":  [(by_hr[h] or {}).get("n_trades") for h in hours],
+            "PF":      [_safe_float((by_hr[h] or {}).get("profit_factor")) for h in hours],
         })
+        df_hr["Net PnL"] = pd.to_numeric(df_hr["Net PnL"], errors="coerce")
+        df_hr["PF"]      = pd.to_numeric(df_hr["PF"],      errors="coerce")
         st.dataframe(
-            df_hr.style.format({"Net PnL": "${:,.2f}", "PF": "{:.3f}"}),
+            df_hr.style
+            .format({"Net PnL": "${:,.2f}", "PF": "{:.3f}"}, na_rep="—")
+            .apply(_colour_pnl_col, subset=["Net PnL"]),
             use_container_width=True, hide_index=True,
         )
 
     # Hold times
     st.markdown("---")
     da = summary.get("duration_analysis", {})
-    fig_hold = hold_time_chart(da)
-    if fig_hold:
+    fig_h = chart_hold_time(da)
+    if fig_h:
         col_h, col_s = st.columns([2, 1])
         with col_h:
-            st.plotly_chart(fig_hold, use_container_width=True)
+            st.plotly_chart(fig_h, use_container_width=True)
         with col_s:
-            ratio = da.get("loss_to_win_hold_ratio")
-            st.metric("Loss/Win Hold Ratio", f"{ratio:.2f}×" if ratio else "—")
-            st.metric("Avg Win Hold",   f"{(da.get('wins') or {}).get('mean') or 0:.1f} min")
-            st.metric("Avg Loss Hold",  f"{(da.get('losses') or {}).get('mean') or 0:.1f} min")
-            st.metric("PnL/min (mean)", fmt(da.get("pnl_per_min_mean"), dec=3))
+            ratio = _safe_float(da.get("loss_to_win_hold_ratio"))
+            st.metric("Loss/Win Hold Ratio",
+                      f"{ratio:.2f}×" if ratio else "—")
+            w = (da.get("wins") or {})
+            l = (da.get("losses") or {})
+            st.metric("Avg Win Hold",
+                      f"{_safe_float(w.get('mean')) or 0:.1f} min")
+            st.metric("Avg Loss Hold",
+                      f"{_safe_float(l.get('mean')) or 0:.1f} min")
+            st.metric("PnL / min",
+                      _f(da.get("pnl_per_min_mean"), pre="$", dec=3))
 
 
-def tab_direction(summary):
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 4 — DIRECTION
+# ═════════════════════════════════════════════════════════════════════════════
+
+def tab_direction(summary: dict):
     by_dir = summary.get("by_direction", {})
     if not by_dir:
-        st.info("No direction breakdown available.")
+        st.info("No direction data available.")
         return
 
     dirs   = list(by_dir.keys())
-    totals = [by_dir[d].get("total_net_pnl", 0) or 0 for d in dirs]
-    st.plotly_chart(bar_chart(dirs, totals, "Net PnL by Direction"),
+    totals = [_safe_float((by_dir[d] or {}).get("total_net_pnl")) or 0 for d in dirs]
+    st.plotly_chart(chart_bars(dirs, totals, "Net PnL by Direction"),
                     use_container_width=True)
 
     rows = []
     for d, b in by_dir.items():
+        if not b:
+            continue
         rows.append({
-            "Direction": d, "Trades": b.get("n_trades"),
-            "Net PnL": b.get("total_net_pnl"),
-            "Win Rate": pct(b.get("win_rate")),
-            "Profit Factor": b.get("profit_factor"),
-            "Avg Win": b.get("avg_win"), "Avg Loss": b.get("avg_loss"),
-            "Sharpe": b.get("sharpe"),
+            "Direction":     d,
+            "Trades":        b.get("n_trades"),
+            "Net PnL":       _safe_float(b.get("total_net_pnl")),
+            "Win Rate":      _pct(b.get("win_rate")),
+            "Profit Factor": _safe_float(b.get("profit_factor")),
+            "Avg Win ($)":   _safe_float(b.get("avg_win")),
+            "Avg Loss ($)":  _safe_float(b.get("avg_loss")),
+            "Sharpe":        _safe_float(b.get("sharpe")),
         })
+    df_d = pd.DataFrame(rows)
+    for col in ["Net PnL","Profit Factor","Avg Win ($)","Avg Loss ($)","Sharpe"]:
+        df_d[col] = pd.to_numeric(df_d[col], errors="coerce")
     st.dataframe(
-        pd.DataFrame(rows).style.format({
+        df_d.style
+        .format({
             "Net PnL": "${:,.2f}", "Profit Factor": "{:.3f}",
-            "Avg Win": "${:,.2f}", "Avg Loss": "${:,.2f}", "Sharpe": "{:.3f}",
-        }),
+            "Avg Win ($)": "${:,.2f}", "Avg Loss ($)": "${:,.2f}",
+            "Sharpe": "{:.3f}",
+        }, na_rep="—")
+        .apply(_colour_pnl_col, subset=["Net PnL"]),
         use_container_width=True, hide_index=True,
     )
 
 
-def tab_inferential(inf):
-    st.markdown("### Bootstrap Confidence Intervals")
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 5 — INFERENTIAL
+# ═════════════════════════════════════════════════════════════════════════════
 
-    # Overall
-    bc = inf.get("bootstrap", {})
-    exp = bc.get("expectancy", {})
-    shr = bc.get("sharpe", {})
+def tab_inferential(inf: dict):
+    if not inf:
+        st.info("Enable 'Run inferential tests' in the sidebar.")
+        return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Expectancy estimate", fmt(exp.get("estimate")))
-    c2.metric("95% CI lower",        fmt(exp.get("ci_lo")))
-    c3.metric("95% CI upper",        fmt(exp.get("ci_hi")))
-    c4.metric("CI excludes zero",    "✅ Yes" if exp.get("significant") else "❌ No")
+    # ── Bootstrap ────────────────────────────────────────────────────────────
+    st.markdown("### Bootstrap Confidence Intervals (10 000 resamples)")
+    bc  = inf.get("bootstrap", {})
+    exp = bc.get("expectancy", {}) or {}
+    shr = bc.get("sharpe",     {}) or {}
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sharpe estimate",  f"{shr.get('estimate') or 0:.3f}")
-    c2.metric("Sharpe CI lower",  f"{shr.get('ci_lo') or 0:.3f}")
-    c3.metric("Sharpe CI upper",  f"{shr.get('ci_hi') or 0:.3f}")
-    c4.metric("Sharpe significant", "✅ Yes" if shr.get("significant") else "❌ No")
+    c = st.columns(4)
+    c[0].metric("Expectancy estimate",  _f(exp.get("estimate")))
+    c[1].metric("95% CI lower",         _f(exp.get("ci_lo")))
+    c[2].metric("95% CI upper",         _f(exp.get("ci_hi")))
+    c[3].metric("CI excludes zero",
+                "✅ Yes" if exp.get("significant") else "❌ No")
 
-    # By instrument CI chart
-    boot_inst = bc.get("by_instrument", {})
-    fig_boot  = bootstrap_ci_chart(boot_inst)
-    if fig_boot:
-        st.plotly_chart(fig_boot, use_container_width=True)
+    c = st.columns(4)
+    c[0].metric("Sharpe estimate",  _f(shr.get("estimate"), pre="", dec=3))
+    c[1].metric("Sharpe CI lower",  _f(shr.get("ci_lo"),    pre="", dec=3))
+    c[2].metric("Sharpe CI upper",  _f(shr.get("ci_hi"),    pre="", dec=3))
+    c[3].metric("Sharpe significant",
+                "✅ Yes" if shr.get("significant") else "❌ No")
 
-    st.markdown("---")
-    st.markdown("### All 10 Statistical Tests")
-
-    def test_row(name, result, p_key="p_value", interp_key="interpretation"):
-        if not result or "note" in result:
-            st.markdown(f"**{name}** — ⚠️ {result.get('note', 'skipped') if result else 'no data'}")
-            return
-        p = result.get(p_key)
-        interp = result.get(interp_key, "")
-        stat_str = ""
-        for k in ["W_stat","U_stat","H_stat","KS_stat","LB_stat","DW_stat","z_stat","observed_diff","observed_runs"]:
-            if k in result and result[k] is not None:
-                stat_str = f" | {k}={result[k]:.3f}"
-                break
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if p is not None:
-                st.markdown(f"**p = {p:.4f}** {sig_badge(p)}")
-            else:
-                st.markdown(f"**{name}**")
-        with col2:
-            st.markdown(f"*{interp}*{stat_str}")
-
-    # Normality
-    nm = inf.get("normality", {})
-    st.markdown("**1. Normality (Shapiro-Wilk + D'Agostino-Pearson)**")
-    sw = nm.get("shapiro_wilk", {})
-    dp = nm.get("dagostino_pearson", {})
-    if sw:
-        test_row("Shapiro-Wilk", sw, p_key="p_value",
-                 interp_key="p_value")
-        st.caption(f"SW: W={sw.get('W_stat',0):.4f}, p={sw.get('p_value',0):.2e} {sig_badge(sw.get('p_value'))}")
-    if dp:
-        st.caption(f"D'AP: K²={dp.get('K2_stat',0):.3f}, p={dp.get('p_value',0):.2e} {sig_badge(dp.get('p_value'))}")
-    st.caption(nm.get("interpretation", ""))
+    fig_b = chart_bootstrap_ci(bc.get("by_instrument", {}))
+    if fig_b:
+        st.plotly_chart(fig_b, use_container_width=True)
 
     st.markdown("---")
 
-    # Hold time
-    ht = inf.get("hold_time", {})
+    # ── Results table ─────────────────────────────────────────────────────────
+    st.markdown("### All 10 Tests — Summary Table")
+
+    def _p_row(label, p, stat_label="", stat_val=None, note=""):
+        p_f    = _safe_float(p)
+        sig    = _sig(p_f) if p_f is not None else "—"
+        stat_s = f"{stat_label}={stat_val:.4f}" if stat_val is not None else ""
+        p_s    = f"{p_f:.4f}" if p_f is not None else "—"
+        st.markdown(
+            f"**{label}** — p = `{p_s}` {sig}"
+            + (f"  ·  {stat_s}" if stat_s else "")
+            + (f"  \n*{note}*" if note else "")
+        )
+
+    # 1. Normality
+    nm = inf.get("normality", {}) or {}
+    sw = nm.get("shapiro_wilk", {}) or {}
+    dp_nm = nm.get("dagostino_pearson", {}) or {}
+    st.markdown("**1. Normality**")
+    _p_row("Shapiro-Wilk", sw.get("p_value"),
+           "W", _safe_float(sw.get("W_stat")),
+           nm.get("interpretation",""))
+    _p_row("D'Agostino-Pearson", dp_nm.get("p_value"),
+           "K²", _safe_float(dp_nm.get("K2_stat")))
+
+    st.markdown("---")
+
+    # 2. Hold-time MWU
+    ht  = inf.get("hold_time", {}) or {}
+    mwu_ht = ht.get("mann_whitney", {}) or {}
     st.markdown("**2. Hold-Time Asymmetry (Mann-Whitney U)**")
-    mwu_ht = ht.get("mann_whitney", {})
-    if mwu_ht and "p_value" in mwu_ht:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("p-value", f"{mwu_ht['p_value']:.4f} {sig_badge(mwu_ht['p_value'])}")
-        c2.metric("Effect size r", f"{mwu_ht.get('effect_size_r',0):.3f} ({mwu_ht.get('effect_label','')})")
-        c3.metric("Reject H₀", "Yes" if mwu_ht.get("reject_h0") else "No")
-        st.caption(mwu_ht.get("interpretation", ""))
+    if "p_value" in mwu_ht:
+        c = st.columns(3)
+        p = _safe_float(mwu_ht.get("p_value"))
+        c[0].metric("p-value", f"{p:.4f} {_sig(p)}" if p else "—")
+        c[1].metric("Effect size r",
+                    f"{_safe_float(mwu_ht.get('effect_size_r')) or 0:.3f}"
+                    f" ({mwu_ht.get('effect_label','')})")
+        c[2].metric("Reject H₀", "Yes" if mwu_ht.get("reject_h0") else "No")
+        st.caption(mwu_ht.get("interpretation",""))
 
     st.markdown("---")
 
-    # MWU by instrument
-    mwu_i = inf.get("mwu_by_instrument", {})
+    # 3. MWU per instrument
+    mwu_i = inf.get("mwu_by_instrument", {}) or {}
     st.markdown("**3. Mann-Whitney U — Per Instrument vs Rest**")
     rows_mwu = []
     for inst, b in mwu_i.items():
-        if not b or "p_value" not in b: continue
+        if not b or "p_value" not in b:
+            continue
+        p = _safe_float(b.get("p_value"))
         rows_mwu.append({
-            "Instrument": inst,
-            "n": b.get("n"),
-            "Median PnL": b.get("median_pnl"),
-            "p-value": b.get("p_value"),
-            "Significance": sig_badge(b.get("p_value")),
-            "Effect r": b.get("effect_size_r"),
-            "Reject H₀": "Yes" if b.get("reject_h0") else "No",
+            "Instrument":   inst,
+            "n":            b.get("n"),
+            "Median PnL":   _safe_float(b.get("median_pnl")),
+            "p-value":      p,
+            "Significance": _sig(p),
+            "Effect r":     _safe_float(b.get("effect_size_r")),
+            "Reject H₀":   "Yes" if b.get("reject_h0") else "No",
         })
     if rows_mwu:
+        df_mwu = pd.DataFrame(rows_mwu).sort_values("p-value")
+        for col in ["Median PnL","p-value","Effect r"]:
+            df_mwu[col] = pd.to_numeric(df_mwu[col], errors="coerce")
         st.dataframe(
-            pd.DataFrame(rows_mwu).sort_values("p-value").style.format({
-                "Median PnL": "${:,.2f}", "p-value": "{:.4f}", "Effect r": "{:.3f}",
-            }),
+            df_mwu.style.format(
+                {"Median PnL": "${:,.2f}", "p-value": "{:.4f}", "Effect r": "{:.3f}"},
+                na_rep="—",
+            ),
             use_container_width=True, hide_index=True,
         )
 
     st.markdown("---")
 
-    # Kruskal-Wallis
-    kw = inf.get("kruskal_wallis", {})
+    # 4. Kruskal-Wallis
+    kw = inf.get("kruskal_wallis", {}) or {}
     st.markdown("**4. Kruskal-Wallis Omnibus Tests**")
-    for label, key in [("By Instrument","by_instrument"),("By Day","by_day"),("By Hour","by_hour")]:
-        r = kw.get(key, {})
-        if not r: continue
-        p = r.get("p_value")
-        st.caption(f"{label}: H={r.get('H_stat',0):.2f}, df={r.get('df',0)}, p={p:.4f} {sig_badge(p)} — {r.get('interpretation','')}")
+    for label, key in [("By Instrument","by_instrument"),
+                       ("By Day","by_day"), ("By Hour","by_hour")]:
+        r = kw.get(key) or {}
+        if not r:
+            continue
+        p = _safe_float(r.get("p_value"))
+        h = _safe_float(r.get("H_stat"))
+        st.caption(
+            f"{label}: H={h:.2f}, df={r.get('df','?')}, "
+            f"p={p:.4f} {_sig(p)} — {r.get('interpretation','')}"
+        )
 
     st.markdown("---")
 
-    # Permutation tests
-    pm = inf.get("permutation", {})
+    # 5. Permutation tests
+    pm = inf.get("permutation", {}) or {}
     st.markdown("**5. Permutation Tests**")
-    for label, key in [("Long vs Short","long_vs_short"),("MNQM6 vs ZFM6","mnqm6_vs_zfm6")]:
-        r = pm.get(key, {})
-        if not r or "note" in r: continue
-        p = r.get("p_value")
-        st.caption(f"{label}: diff=${r.get('observed_diff',0):.2f}, p={p:.4f} {sig_badge(p)} — {r.get('interpretation','')}")
+    for label, key in [("Long vs Short","long_vs_short"),
+                       ("MNQM6 vs ZFM6","mnqm6_vs_zfm6")]:
+        r = pm.get(key) or {}
+        if not r or "note" in r:
+            continue
+        p   = _safe_float(r.get("p_value"))
+        dif = _safe_float(r.get("observed_diff"))
+        st.caption(
+            f"{label}: diff=${dif:.2f}, p={p:.4f} {_sig(p)}"
+            f" — {r.get('interpretation','')}"
+        )
 
     st.markdown("---")
 
-    # Ljung-Box
-    lb = inf.get("ljung_box", {})
+    # 6. Ljung-Box
+    lb = inf.get("ljung_box", {}) or {}
     st.markdown("**6. Ljung-Box Autocorrelation**")
     if "results" in lb:
-        for lag_key, lr in lb["results"].items():
-            p = lr.get("p_value")
-            st.caption(f"Lag {lr.get('lag')}: LB={lr.get('LB_stat',0):.2f}, p={p:.4f} {sig_badge(p)}")
+        for lag_key, lr in (lb.get("results") or {}).items():
+            p = _safe_float((lr or {}).get("p_value"))
+            lbv = _safe_float((lr or {}).get("LB_stat"))
+            st.caption(
+                f"Lag {(lr or {}).get('lag','?')}: "
+                f"LB={lbv:.2f}, p={p:.4f} {_sig(p)}"
+            )
         st.caption(lb.get("interpretation",""))
     elif "note" in lb:
         st.caption(lb["note"])
 
     st.markdown("---")
 
-    # DW
-    dw = inf.get("durbin_watson", {})
-    st.markdown("**7. Durbin-Watson (First-Order Autocorrelation)**")
-    st.caption(f"DW = {dw.get('DW_stat',0):.4f} — {dw.get('interpretation','')}")
+    # 7. Durbin-Watson
+    dw = inf.get("durbin_watson", {}) or {}
+    st.markdown("**7. Durbin-Watson**")
+    st.caption(
+        f"DW = {_safe_float(dw.get('DW_stat')) or 0:.4f}"
+        f" — {dw.get('interpretation','')}"
+    )
 
     st.markdown("---")
 
-    # Runs test
-    ru = inf.get("runs_test", {})
+    # 8. Runs test
+    ru = inf.get("runs_test", {}) or {}
     st.markdown("**8. Wald-Wolfowitz Runs Test**")
     if "p_value" in ru:
-        p = ru.get("p_value")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Observed runs", ru.get("observed_runs"))
-        c2.metric("Expected runs", f"{ru.get('expected_runs',0):.1f}")
-        c3.metric("p-value", f"{p:.4f} {sig_badge(p)}")
+        c = st.columns(3)
+        p = _safe_float(ru.get("p_value"))
+        c[0].metric("Observed runs",  ru.get("observed_runs","—"))
+        c[1].metric("Expected runs",
+                    f"{_safe_float(ru.get('expected_runs')) or 0:.1f}")
+        c[2].metric("p-value",
+                    f"{p:.4f} {_sig(p)}" if p is not None else "—")
         st.caption(ru.get("interpretation",""))
+    elif "note" in ru:
+        st.caption(ru["note"])
 
     st.markdown("---")
 
-    # CUSUM
-    cusum = inf.get("cusum", {})
+    # 9. CUSUM
+    cusum = inf.get("cusum", {}) or {}
     st.markdown("**9. CUSUM Regime Detection**")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Current regime",     cusum.get("current_regime","—").upper())
-    c2.metric("First shift at trade", cusum.get("first_regime_shift_trade","—"))
-    c3.metric("Downward signals",   len(cusum.get("change_points_down",[])))
+    c = st.columns(3)
+    c[0].metric("Current regime",
+                str(cusum.get("current_regime","—")).upper())
+    c[1].metric("First shift at trade",
+                cusum.get("first_regime_shift_trade","—"))
+    c[2].metric("Downward signals",
+                len(cusum.get("change_points_down",[])))
     st.caption(cusum.get("interpretation",""))
-    fig_cs = cusum_chart(cusum)
+    fig_cs = chart_cusum(cusum)
     if fig_cs:
         st.plotly_chart(fig_cs, use_container_width=True)
 
+    st.markdown("---")
 
-def tab_raw(df):
+    # 10. Bootstrap CI by instrument table
+    st.markdown("**10. Bootstrap CI — Per Instrument**")
+    ci_rows = []
+    for inst, b in (bc.get("by_instrument") or {}).items():
+        if not b or b.get("estimate") is None:
+            continue
+        ci_rows.append({
+            "Instrument": inst,
+            "Estimate ($)": _safe_float(b.get("estimate")),
+            "CI Low ($)":   _safe_float(b.get("ci_lo")),
+            "CI High ($)":  _safe_float(b.get("ci_hi")),
+            "Excl. Zero":   "✅" if b.get("significant") else "❌",
+        })
+    if ci_rows:
+        df_ci = pd.DataFrame(ci_rows)
+        for col in ["Estimate ($)","CI Low ($)","CI High ($)"]:
+            df_ci[col] = pd.to_numeric(df_ci[col], errors="coerce")
+        st.dataframe(
+            df_ci.style.format(
+                {"Estimate ($)": "${:,.2f}",
+                 "CI Low ($)":   "${:,.2f}",
+                 "CI High ($)":  "${:,.2f}"},
+                na_rep="—",
+            ).apply(_colour_pnl_col, subset=["Estimate ($)"]),
+            use_container_width=True, hide_index=True,
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 6 — RAW DATA
+# ═════════════════════════════════════════════════════════════════════════════
+
+def tab_raw(df: pd.DataFrame):
     st.markdown(f"**{len(df)} trades** · {len(df.columns)} columns")
 
-    # Filters
-    c1, c2, c3 = st.columns(3)
+    c = st.columns(3)
     insts = ["All"] + sorted(df["instrument"].dropna().unique().tolist())
     dirs  = ["All"] + sorted(df["direction"].dropna().unique().tolist())
     outs  = ["All"] + sorted(df["outcome"].dropna().unique().tolist())
-    sel_inst = c1.selectbox("Instrument", insts)
-    sel_dir  = c2.selectbox("Direction",  dirs)
-    sel_out  = c3.selectbox("Outcome",    outs)
+    sel_inst = c[0].selectbox("Instrument", insts)
+    sel_dir  = c[1].selectbox("Direction",  dirs)
+    sel_out  = c[2].selectbox("Outcome",    outs)
 
     fdf = df.copy()
     if sel_inst != "All": fdf = fdf[fdf["instrument"] == sel_inst]
     if sel_dir  != "All": fdf = fdf[fdf["direction"]  == sel_dir]
     if sel_out  != "All": fdf = fdf[fdf["outcome"]    == sel_out]
 
-    cols = ["trade_index","trade_date","instrument","direction","entry_price",
-            "exit_price","net_pnl","outcome","duration_minutes","hour_bin","day_name"]
-    show_cols = [c for c in cols if c in fdf.columns]
-    st.dataframe(
-        fdf[show_cols].style.format({
-            "net_pnl": "${:,.2f}",
-            "entry_price": "{:,.2f}",
-            "exit_price": "{:,.2f}",
-            "duration_minutes": "{:.1f}",
-        }).map(
-            lambda v: f"color:{GREEN}" if v == "win" else
-                      (f"color:{RED}" if v == "loss" else ""),
-            subset=["outcome"],
-        ),
-        use_container_width=True, hide_index=True,
-    )
+    st.caption(f"Showing {len(fdf)} trades")
 
-    # Download
+    display_cols = [
+        "trade_index","trade_date","instrument","direction",
+        "entry_price","exit_price","net_pnl","outcome",
+        "duration_minutes","hour_bin","day_name",
+    ]
+    show_cols = [c for c in display_cols if c in fdf.columns]
+    dsp = fdf[show_cols].copy()
+
+    # Ensure numeric columns are numeric
+    for col in ["net_pnl","entry_price","exit_price","duration_minutes"]:
+        if col in dsp.columns:
+            dsp[col] = pd.to_numeric(dsp[col], errors="coerce")
+
+    fmt_map = {}
+    if "net_pnl"           in dsp.columns: fmt_map["net_pnl"]           = "${:,.2f}"
+    if "entry_price"       in dsp.columns: fmt_map["entry_price"]       = "{:,.2f}"
+    if "exit_price"        in dsp.columns: fmt_map["exit_price"]        = "{:,.2f}"
+    if "duration_minutes"  in dsp.columns: fmt_map["duration_minutes"]  = "{:.1f}"
+
+    apply_subsets = {}
+    if "net_pnl" in dsp.columns:   apply_subsets["net_pnl"] = _colour_pnl_col
+    if "outcome" in dsp.columns:   apply_subsets["outcome"] = _colour_outcome_col
+
+    styled = dsp.style.format(fmt_map, na_rep="—")
+    for col, fn in apply_subsets.items():
+        styled = styled.apply(fn, subset=[col])
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
     csv = fdf.to_csv(index=False).encode()
     st.download_button("⬇ Download filtered CSV", csv,
                        "filtered_trades.csv", "text/csv")
 
 
-def tab_json(summary, inf):
-    st.markdown("### JSON Summary Payload")
-    st.markdown("Copy this and paste directly into a Claude conversation for deep statistical dialogue.")
-    combined = {"descriptive": summary, "inferential": _json_safe(inf)}
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 7 — JSON EXPORT
+# ═════════════════════════════════════════════════════════════════════════════
+
+def tab_json(summary: dict, inf: dict):
+    st.markdown(
+        "Paste this payload into Claude for deeper statistical dialogue "
+        "or archive it alongside your trade data."
+    )
+    combined = _json_safe({"descriptive": summary, "inferential": inf})
     js = json.dumps(combined, indent=2, default=str)
-    st.code(js[:8000] + ("\n... (truncated for display)" if len(js) > 8000 else ""),
-            language="json")
-    st.download_button("⬇ Download full summary.json",
-                       js.encode(), "summary.json", "application/json")
+    PREVIEW_LIMIT = 8000
+    st.code(
+        js[:PREVIEW_LIMIT] + ("\n\n# ... truncated — download for full payload"
+                              if len(js) > PREVIEW_LIMIT else ""),
+        language="json",
+    )
+    st.download_button(
+        "⬇ Download summary.json",
+        js.encode(), "summary.json", "application/json",
+    )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
 
 def main():
-    uploaded, run_inf, merge_files = render_sidebar()
+    uploaded, run_inf, merge = render_sidebar()
 
-    # ── landing page ──────────────────────────────────────────────────────────
+    # ── Landing page ──────────────────────────────────────────────────────────
     if uploaded is None:
         st.markdown("""
 # 📊 Trading Analytics Platform
 
-Upload your broker export in the sidebar to get started.
+**Upload your broker export in the sidebar to start.**
 
-**Supported brokers** — auto-detected, zero configuration:
-- NinjaTrader / Topstep (CSV)
-- Interactive Brokers (Flex Query)
-- Tradovate · TradeStation · Tastytrade
-- MetaTrader 4/5 · Rithmic / Apex
-- Binance · Kraken · Webull
+### Supported brokers (auto-detected)
+NinjaTrader / Topstep · Interactive Brokers · Tradovate · TradeStation ·
+Tastytrade · MetaTrader 4/5 · Rithmic / Apex · Binance · Kraken · Webull
 
-**What you get:**
-- Full descriptive statistics — equity curve, by instrument, by direction, by day, by hour, hold-time analysis, fee drag
-- 10 inferential tests — bootstrap CIs, Mann-Whitney U, Kruskal-Wallis, permutation tests, Ljung-Box, CUSUM, runs test
-- Downloadable JSON payload to use with Claude for deeper analysis
+### What you get
+- **Overview** — equity curve, daily PnL, all key metrics
+- **Instruments** — per-instrument stats, scatter plot, full table
+- **Timing** — by day of week, by hour bin, hold-time asymmetry
+- **Direction** — Long vs Short breakdown
+- **Inferential** — 10 tests: bootstrap CIs, Mann-Whitney U, Kruskal-Wallis,
+  permutation tests, Ljung-Box, Durbin-Watson, runs test, CUSUM
+- **Raw Data** — filterable table + CSV download
+- **JSON Export** — full analytical payload for Claude
         """)
         return
 
-    # ── load & process ────────────────────────────────────────────────────────
+    # ── Ingest ────────────────────────────────────────────────────────────────
     with st.spinner("Detecting broker and loading file…"):
         try:
-            # Save upload to temp file (ingest needs a path)
-            suffix = Path(uploaded.name).suffix
-            import tempfile
+            suffix = Path(uploaded.name).suffix or ".csv"
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
                 tf.write(uploaded.read())
-                tmp = Path(tf.name)
+                tmp_path = Path(tf.name)
 
-            result = ingest(tmp)
-            tmp.unlink(missing_ok=True)
-            df_new = enrich(result.df)
+            result  = ingest(tmp_path)
+            df_new  = enrich(result.df)
+            tmp_path.unlink(missing_ok=True)
 
         except Exception as e:
-            st.error(f"Failed to load file: {e}")
+            st.error(f"Could not load file: {e}")
             return
 
-    # Merge if requested
-    if merge_files and "prev_df" in st.session_state:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            df = pd.concat([st.session_state["prev_df"], df_new],
-                           ignore_index=True).sort_values("entered_at_dt").reset_index(drop=True)
-            df["trade_index"] = range(1, len(df)+1)
-        st.success(f"Merged {len(st.session_state['prev_df'])} + {len(df_new)} = **{len(df)} trades**")
+    # ── Merge ─────────────────────────────────────────────────────────────────
+    if merge and "prev_df" in st.session_state:
+        prev = st.session_state["prev_df"]
+        df = (
+            pd.concat([prev, df_new], ignore_index=True)
+            .sort_values("entered_at_dt")
+            .reset_index(drop=True)
+        )
+        df["trade_index"] = range(1, len(df) + 1)
+        st.success(f"Merged {len(prev)} + {len(df_new)} = **{len(df)} trades**")
     else:
         df = df_new
 
     st.session_state["prev_df"] = df
 
-    # Broker info banner
-    if result.warnings:
-        for w in result.warnings:
-            st.warning(w)
+    # ── Broker banner ─────────────────────────────────────────────────────────
+    for w in (result.warnings or []):
+        st.warning(w)
     st.caption(
-        f"🔍 Detected broker: **{result.broker}** "
-        f"({result.confidence:.0%} confidence)  ·  "
+        f"🔍 Broker: **{result.broker}** ({result.confidence:.0%} confidence)  ·  "
         f"**{len(df)} trades** loaded"
     )
 
-    # ── compute ───────────────────────────────────────────────────────────────
-    with st.spinner("Computing descriptive statistics…"):
+    # ── Compute ───────────────────────────────────────────────────────────────
+    with st.spinner("Computing statistics…"):
         summary = build_summary(df)
 
     inf = {}
     if run_inf:
-        with st.spinner("Running 10 inferential tests (bootstrap takes ~5 sec)…"):
+        with st.spinner("Running inferential tests (~5 sec)…"):
             inf = run_all(df)
 
-    # ── tabs ──────────────────────────────────────────────────────────────────
+    # ── Render tabs ───────────────────────────────────────────────────────────
     tabs = st.tabs([
         "📈 Overview",
         "🎯 Instruments",
@@ -913,11 +1024,7 @@ Upload your broker export in the sidebar to get started.
     with tabs[1]: tab_instruments(summary)
     with tabs[2]: tab_timing(summary)
     with tabs[3]: tab_direction(summary)
-    with tabs[4]:
-        if inf:
-            tab_inferential(inf)
-        else:
-            st.info("Enable 'Run inferential tests' in the sidebar and reload.")
+    with tabs[4]: tab_inferential(inf)
     with tabs[5]: tab_raw(df)
     with tabs[6]: tab_json(summary, inf)
 
