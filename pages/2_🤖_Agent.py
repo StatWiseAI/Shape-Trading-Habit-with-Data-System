@@ -1,14 +1,5 @@
 """
-pages/2_Agent.py
-=================
-Streamlit multi-page entry for the AI trading co-pilot agent.
-
-Setup
------
-Add your Anthropic API key in Streamlit Cloud:
-  App settings → Secrets →
-  [anthropic]
-  ANTHROPIC_API_KEY = "sk-ant-..."
+pages/2_Agent.py  —  AI Trading Co-Pilot Agent
 """
 
 import os
@@ -16,27 +7,46 @@ import sys
 import json
 from pathlib import Path
 
-# ── Repo root on sys.path BEFORE any other import ────────────────────────────
-# On Streamlit Cloud, pages/ files run with cwd = repo root, but __file__
-# is the pages/ subdirectory. Both approaches below cover all cases.
-_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-_CWD = str(Path.cwd())
-if _CWD not in sys.path:
-    sys.path.insert(0, _CWD)
+# ── Aggressive path setup — cover every possible Streamlit Cloud mount point ──
+def _setup_paths():
+    candidates = [
+        Path(__file__).resolve().parent.parent,   # pages/../  = repo root
+        Path(__file__).resolve().parent,           # pages/     (fallback)
+        Path.cwd(),                                # wherever Streamlit sets cwd
+        Path("/mount/src"),                        # Streamlit Cloud mount root
+    ]
+    # Also walk up from cwd looking for the agent package
+    p = Path.cwd()
+    for _ in range(5):
+        candidates.append(p)
+        if (p / "agent" / "__init__.py").exists():
+            break
+        p = p.parent
+
+    for c in candidates:
+        s = str(c)
+        if s not in sys.path:
+            sys.path.insert(0, s)
+        # Also try the first subdirectory that contains agent/
+        for sub in c.iterdir() if c.is_dir() else []:
+            if sub.is_dir() and (sub / "agent" / "__init__.py").exists():
+                s2 = str(sub)
+                if s2 not in sys.path:
+                    sys.path.insert(0, s2)
+
+_setup_paths()
 
 import streamlit as st
 import pandas as pd
 
-# ── Inject API key from Streamlit secrets ─────────────────────────────────────
+# ── Inject API key ────────────────────────────────────────────────────────────
 try:
     if "anthropic" in st.secrets:
         os.environ["ANTHROPIC_API_KEY"] = st.secrets["anthropic"]["ANTHROPIC_API_KEY"]
 except Exception:
     pass
 
-# ── Top-level agent imports — errors surfaced gracefully in the UI ────────────
+# ── Agent imports ─────────────────────────────────────────────────────────────
 AGENT_AVAILABLE = False
 _AGENT_ERR = ""
 try:
@@ -48,8 +58,6 @@ except ImportError as e:
 except Exception as e:
     _AGENT_ERR = str(e)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Trading Co-Pilot",
@@ -87,10 +95,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def get_df():
     return st.session_state.get("prev_df")
 
@@ -98,40 +102,62 @@ def api_key_ok():
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────────────────────
-
 def main():
     st.title("🤖 AI Trading Co-Pilot Agent")
     st.caption(
-        "The agent autonomously analyses your trade data, runs statistical tests, "
-        "and produces evidence-based trading rule recommendations."
+        "The agent autonomously analyses your trade data, runs statistical "
+        "tests, and produces evidence-based trading rule recommendations."
     )
 
-    # ── Agent module check ────────────────────────────────────────────────────
+    # ── Debug panel — shows path info to diagnose import failures ────────────
     if not AGENT_AVAILABLE:
-        st.error(
-            "Could not import agent modules.\n\n"
-            "Error: " + _AGENT_ERR + "\n\n"
-            "Make sure the agent/ directory is uploaded to your repo root "
-            "alongside app.py."
-        )
-        st.code(
-            "trading-platform/\n"
-            "├── app.py\n"
-            "├── agent/\n"
-            "│   ├── __init__.py\n"
-            "│   ├── tools.py\n"
-            "│   ├── memory.py\n"
-            "│   ├── prompts.py\n"
-            "│   └── loop.py\n"
-            "└── pages/\n"
-            "    └── 2_Agent.py"
+        st.error("Could not import agent modules: " + _AGENT_ERR)
+
+        with st.expander("🔍 Debug: file system view (click to expand)", expanded=True):
+            st.markdown("**`__file__`**")
+            st.code(str(Path(__file__).resolve()))
+
+            st.markdown("**`Path.cwd()`**")
+            st.code(str(Path.cwd()))
+
+            st.markdown("**`sys.path` (first 8 entries)**")
+            st.code("\n".join(sys.path[:8]))
+
+            st.markdown("**Contents of repo root** (`__file__/../..`)")
+            repo = Path(__file__).resolve().parent.parent
+            try:
+                contents = sorted([p.name for p in repo.iterdir()])
+                st.code("\n".join(contents))
+            except Exception as ex:
+                st.code("Error listing directory: " + str(ex))
+
+            st.markdown("**Contents of cwd**")
+            try:
+                contents_cwd = sorted([p.name for p in Path.cwd().iterdir()])
+                st.code("\n".join(contents_cwd))
+            except Exception as ex:
+                st.code("Error: " + str(ex))
+
+            st.markdown("**Looking for agent/__init__.py in sys.path**")
+            found = []
+            for p in sys.path:
+                check = Path(p) / "agent" / "__init__.py"
+                if check.exists():
+                    found.append(str(check))
+            st.code("\n".join(found) if found else "NOT FOUND in any sys.path entry")
+
+        st.markdown(
+            "**How to fix:** Make sure these files are uploaded to GitHub "
+            "at the **repo root** (same level as `app.py`):  \n"
+            "`agent/__init__.py`  \n"
+            "`agent/tools.py`  \n"
+            "`agent/memory.py`  \n"
+            "`agent/prompts.py`  \n"
+            "`agent/loop.py`"
         )
         return
 
-    # ── Data check ───────────────────────────────────────────────────────────
+    # ── Data check ────────────────────────────────────────────────────────────
     df = get_df()
     if df is None:
         st.warning(
@@ -143,17 +169,18 @@ def main():
     # ── API key check ─────────────────────────────────────────────────────────
     if not api_key_ok():
         st.error(
-            "Anthropic API key not found.\n\n"
-            "Go to: Streamlit Cloud → your app → Settings → Secrets\n\n"
-            "Paste:\n"
+            "Anthropic API key not found.  \n\n"
+            "Go to: **Streamlit Cloud → your app → Settings → Secrets**  \n\n"
+            "Paste:  \n"
+            "```toml\n"
             "[anthropic]\n"
-            'ANTHROPIC_API_KEY = "sk-ant-YOUR-KEY-HERE"'
+            'ANTHROPIC_API_KEY = "sk-ant-YOUR-KEY-HERE"\n'
+            "```"
         )
         return
 
     st.success(str(len(df)) + " trades loaded · API key present")
 
-    # ── Layout ────────────────────────────────────────────────────────────────
     col_left, col_right = st.columns([2, 1])
 
     # ── RIGHT: Research Log ───────────────────────────────────────────────────
@@ -163,18 +190,16 @@ def main():
         if findings:
             for f in reversed(findings):
                 conf  = f.get("confidence", "medium").lower()
-                css   = "finding-high" if conf == "high" else (
-                        "finding-medium" if conf == "medium" else "finding-low")
-                badge = conf.upper()
-                title = f.get("title", "")
-                body  = f.get("finding", "")
-                action = f.get("action", "")
+                css   = "finding-" + (conf if conf in ["high","medium","low"] else "medium")
                 st.markdown(
                     '<div class="' + css + '">'
-                    '<strong>[' + str(f["id"]) + '] ' + title + '</strong> '
-                    '<span style="color:#607D8B;font-size:11px">' + badge + '</span><br>'
-                    + body + '<br>'
-                    '<span style="color:#00C2CB">→ ' + action + '</span>'
+                    '<strong>[' + str(f.get("id","")) + '] '
+                    + f.get("title","") + '</strong> '
+                    '<span style="color:#607D8B;font-size:11px">'
+                    + conf.upper() + '</span><br>'
+                    + f.get("finding","") + '<br>'
+                    '<span style="color:#00C2CB">→ '
+                    + f.get("action","") + '</span>'
                     '</div>',
                     unsafe_allow_html=True,
                 )
@@ -223,7 +248,6 @@ def main():
 
             output_container = st.container()
             tool_container   = st.container()
-
             full_text = ""
             tool_log  = []
 
@@ -244,7 +268,8 @@ def main():
                         full_text += event["text"]
                         with output_container:
                             st.markdown(
-                                '<div class="agent-bubble">' + full_text + '</div>',
+                                '<div class="agent-bubble">'
+                                + full_text + '</div>',
                                 unsafe_allow_html=True,
                             )
 
@@ -252,9 +277,7 @@ def main():
                         params_str = json.dumps(event["params"], indent=2)[:300]
                         tool_log.append(
                             '<div class="tool-call">🔧 '
-                            + event["tool"]
-                            + "(" + params_str + ")"
-                            + "</div>"
+                            + event["tool"] + "(" + params_str + ")</div>"
                         )
                         with tool_container:
                             st.markdown("".join(tool_log), unsafe_allow_html=True)
