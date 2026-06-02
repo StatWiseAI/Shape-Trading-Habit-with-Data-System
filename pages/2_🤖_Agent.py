@@ -7,34 +7,22 @@ import sys
 import json
 from pathlib import Path
 
-# ── Aggressive path setup — cover every possible Streamlit Cloud mount point ──
-def _setup_paths():
-    candidates = [
-        Path(__file__).resolve().parent.parent,   # pages/../  = repo root
-        Path(__file__).resolve().parent,           # pages/     (fallback)
-        Path.cwd(),                                # wherever Streamlit sets cwd
-        Path("/mount/src"),                        # Streamlit Cloud mount root
-    ]
-    # Also walk up from cwd looking for the agent package
-    p = Path.cwd()
+# ── Path setup: add repo root to sys.path ────────────────────────────────────
+# Strategy: walk upward from __file__ until we find the directory that
+# contains agent/__init__.py — that is the repo root. Add only that directory.
+def _find_repo_root() -> str:
+    # Start from pages/ and go up
+    p = Path(__file__).resolve().parent
     for _ in range(5):
-        candidates.append(p)
         if (p / "agent" / "__init__.py").exists():
-            break
+            return str(p)
         p = p.parent
+    # Fallback: cwd (Streamlit Cloud sets cwd = repo root)
+    return str(Path.cwd())
 
-    for c in candidates:
-        s = str(c)
-        if s not in sys.path:
-            sys.path.insert(0, s)
-        # Also try the first subdirectory that contains agent/
-        for sub in c.iterdir() if c.is_dir() else []:
-            if sub.is_dir() and (sub / "agent" / "__init__.py").exists():
-                s2 = str(sub)
-                if s2 not in sys.path:
-                    sys.path.insert(0, s2)
-
-_setup_paths()
+_repo_root = _find_repo_root()
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 import streamlit as st
 import pandas as pd
@@ -120,6 +108,8 @@ def main():
             st.markdown("**`Path.cwd()`**")
             st.code(str(Path.cwd()))
 
+            st.markdown("**Resolved repo root**")
+            st.code(_repo_root)
             st.markdown("**`sys.path` (first 8 entries)**")
             st.code("\n".join(sys.path[:8]))
 
