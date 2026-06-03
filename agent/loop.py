@@ -1,42 +1,25 @@
 """
 agent/loop.py
 =============
-The agent reasoning loop.
+Agent reasoning loop — Google Gemini backend.
 
-Architecture
-------------
-This is a standard Anthropic tool-use loop:
+Uses google-genai SDK with native function calling.
+Model: gemini-2.0-flash (free tier, fast, supports function calling).
 
-  1. Send user task + system prompt + tool definitions to Claude
-  2. Claude returns either:
-     a. A final text response  →  done
-     b. One or more tool_use blocks  →  execute tools, send results back
-  3. Repeat until a final text response is received
+Falls back gracefully if the model changes — set GEMINI_MODEL env var to override.
 
-The loop streams events back to the caller via a generator so the Streamlit
-UI can display progress in real time.
-
-Usage
------
-    from agent.loop import run_agent
-
+Usage:
     for event in run_agent(df=df, task_type="full_audit"):
-        if event["type"] == "text_delta":
-            print(event["text"], end="", flush=True)
-        elif event["type"] == "tool_call":
-            print(f"\n[Tool] {event['tool']}({event['params']})")
-        elif event["type"] == "tool_result":
-            print(f"[Result] {event['result']}")
-        elif event["type"] == "done":
-            break
-        elif event["type"] == "error":
-            print(f"Error: {event['message']}")
-            break
+        if event["type"] == "text_delta":   print(event["text"])
+        elif event["type"] == "tool_call":  print(event["tool"])
+        elif event["type"] == "done":       break
+        elif event["type"] == "error":      print(event["message"]); break
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Generator, Any
 
 import pandas as pd
@@ -45,19 +28,55 @@ from agent.tools   import get_tool_definitions, execute_tool
 from agent.prompts import build_task_prompt
 from agent.memory  import get_findings_summary
 
-
-# ── Anthropic client (lazy import so the module loads without the key) ────────
-def _get_client():
-    import anthropic
-    return anthropic.Anthropic()   # reads ANTHROPIC_API_KEY from env
-
-
-MODEL     = "claude-opus-4-5"
-MAX_ITER  = 20      # hard ceiling on tool-use rounds to prevent infinite loops
+MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+MAX_ITER  = 20
 MAX_TOKENS = 4096
 
-
 Event = dict[str, Any]
+
+
+def _build_gemini_tools(tool_defs: list[dict]):
+    """Convert Anthropic-style tool definitions to Gemini FunctionDeclaration list."""
+    from google.genai import types
+
+    declarations = []
+    for t in tool_defs:
+        schema = t.get("input_schema", {})
+        props  = schema.get("properties", {})
+        req    = schema.get("required", [])
+
+        # Convert each property to Gemini Schema
+        gemini_props = {}
+        for pname, pdef in props.items():
+            ptype = pdef.get("type", "string").upper()
+            # Gemini type map
+            type_map = {
+                "STRING":  "STRING",
+                "NUMBER":  "NUMBER",
+                "INTEGER": "INTEGER",
+                "BOOLEAN": "BOOLEAN",
+                "OBJECT":  "OBJECT",
+                "ARRAY":   "ARRAY",
+            }
+            gemini_type = type_map.get(ptype, "STRING")
+            gemini_props[pname] = types.Schema(
+                type=gemini_type,
+                description=pdef.get("description", ""),
+            )
+
+        fn_schema = types.Schema(
+            type="OBJECT",
+            properties=gemini_props,
+            required=req,
+        )
+        declarations.append(
+            types.FunctionDeclaration(
+                name=t["name"],
+                description=t["description"],
+                parameters=fn_schema,
+            )
+        )
+    return [types.Tool(function_declarations=declarations)]
 
 
 def run_agent(
@@ -67,23 +86,30 @@ def run_agent(
     max_iter: int = MAX_ITER,
 ) -> Generator[Event, None, None]:
     """
-    Run the agent on a trading DataFrame.
+    Run the agent reasoning loop using Google Gemini.
 
-    Yields Event dicts:
-        {"type": "thinking",    "text": "..."}
-        {"type": "text_delta",  "text": "..."}
-        {"type": "tool_call",   "tool": "...", "params": {...}}
-        {"type": "tool_result", "tool": "...", "result": {...}}
-        {"type": "done",        "final_text": "..."}
-        {"type": "error",       "message": "..."}
+    Yields Event dicts — same interface as the Anthropic version so the
+    Streamlit page works without changes.
     """
-    client     = _get_client()
-    tools_defs = get_tool_definitions()
-    findings   = get_findings_summary()
-    system     = build_task_prompt(task_type, user_input, findings)
+    import google.genai as genai
+    from google.genai import types
 
-    messages: list[dict] = [
-        {"role": "user", "content": "Please begin the analysis."}
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        yield {"type": "error",
+               "message": "GEMINI_API_KEY not set. Add it to Streamlit secrets."}
+        return
+
+    client = genai.Client(api_key=api_key)
+
+    # Build system prompt + tool definitions
+    findings  = get_findings_summary()
+    system    = build_task_prompt(task_type, user_input, findings)
+    tools     = _build_gemini_tools(get_tool_definitions())
+
+    # Gemini conversation history
+    contents: list = [
+        types.UserContent(parts=[types.Part(text="Please begin the analysis.")])
     ]
 
     final_text = ""
@@ -94,47 +120,56 @@ def run_agent(
         yield {"type": "thinking", "text": f"Agent iteration {iteration}…"}
 
         try:
-            response = client.messages.create(
-                model      = MODEL,
-                max_tokens = MAX_TOKENS,
-                system     = system,
-                tools      = tools_defs,
-                messages   = messages,
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    tools=tools,
+                    max_output_tokens=MAX_TOKENS,
+                    temperature=0.1,
+                ),
             )
         except Exception as e:
             yield {"type": "error", "message": str(e)}
             return
 
-        # ── collect text and tool-use blocks ─────────────────────────────────
-        text_blocks      = []
-        tool_use_blocks  = []
+        # ── Parse response parts ──────────────────────────────────────────────
+        candidate   = response.candidates[0]
+        parts       = candidate.content.parts if candidate.content else []
+        text_parts  = []
+        fn_calls    = []
 
-        for block in response.content:
-            if block.type == "text":
-                text_blocks.append(block.text)
-                yield {"type": "text_delta", "text": block.text}
-            elif block.type == "tool_use":
-                tool_use_blocks.append(block)
+        for part in parts:
+            if hasattr(part, "text") and part.text:
+                text_parts.append(part.text)
+                yield {"type": "text_delta", "text": part.text}
+            if hasattr(part, "function_call") and part.function_call:
+                fn_calls.append(part.function_call)
 
-        if text_blocks:
-            final_text += "\n".join(text_blocks)
+        if text_parts:
+            final_text += "\n".join(text_parts)
 
-        # ── stopping condition ────────────────────────────────────────────────
-        if response.stop_reason == "end_turn" or not tool_use_blocks:
+        # ── Stopping condition ────────────────────────────────────────────────
+        finish = candidate.finish_reason
+        # STOP = natural end, MAX_TOKENS = ran out of tokens
+        # If no function calls and model has stopped, we are done
+        if not fn_calls:
             yield {"type": "done", "final_text": final_text}
             return
 
-        # ── execute tool calls ────────────────────────────────────────────────
-        # Add assistant message with all content
-        messages.append({
-            "role":    "assistant",
-            "content": response.content,
-        })
+        # ── Add model turn to history ─────────────────────────────────────────
+        contents.append(types.ModelContent(parts=parts))
 
-        tool_results = []
-        for block in tool_use_blocks:
-            tool_name = block.name
-            params    = block.input if isinstance(block.input, dict) else {}
+        # ── Execute tool calls ────────────────────────────────────────────────
+        fn_response_parts = []
+        for fc in fn_calls:
+            tool_name = fc.name
+            # Gemini passes args as a dict-like object
+            try:
+                params = dict(fc.args) if fc.args else {}
+            except Exception:
+                params = {}
 
             yield {"type": "tool_call", "tool": tool_name, "params": params}
 
@@ -142,16 +177,19 @@ def run_agent(
 
             yield {"type": "tool_result", "tool": tool_name, "result": result}
 
-            tool_results.append({
-                "type":        "tool_result",
-                "tool_use_id": block.id,
-                "content":     json.dumps(result, default=str)[:8000],  # token safety
-            })
+            fn_response_parts.append(
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        name=tool_name,
+                        response={"result": json.dumps(result, default=str)[:6000]},
+                    )
+                )
+            )
 
-        # ── add tool results to conversation ──────────────────────────────────
-        messages.append({
-            "role":    "user",
-            "content": tool_results,
-        })
+        # ── Add tool results to conversation ──────────────────────────────────
+        contents.append(
+            types.UserContent(parts=fn_response_parts)
+        )
 
-    yield {"type": "error", "message": f"Max iterations ({max_iter}) reached."}
+    yield {"type": "error",
+           "message": f"Max iterations ({max_iter}) reached without conclusion."}
