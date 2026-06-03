@@ -1,5 +1,6 @@
 """
 pages/2_Agent.py  —  AI Trading Co-Pilot Agent
+Works with Google Gemini (free) or Anthropic Claude (paid).
 """
 
 import os
@@ -7,17 +8,13 @@ import sys
 import json
 from pathlib import Path
 
-# ── Path setup: add repo root to sys.path ────────────────────────────────────
-# Strategy: walk upward from __file__ until we find the directory that
-# contains agent/__init__.py — that is the repo root. Add only that directory.
+# ── Find repo root by walking up from pages/ until agent/__init__.py found ───
 def _find_repo_root() -> str:
-    # Start from pages/ and go up
     p = Path(__file__).resolve().parent
     for _ in range(5):
         if (p / "agent" / "__init__.py").exists():
             return str(p)
         p = p.parent
-    # Fallback: cwd (Streamlit Cloud sets cwd = repo root)
     return str(Path.cwd())
 
 _repo_root = _find_repo_root()
@@ -27,7 +24,12 @@ if _repo_root not in sys.path:
 import streamlit as st
 import pandas as pd
 
-# ── Inject API key ────────────────────────────────────────────────────────────
+# ── Inject API keys from Streamlit secrets ───────────────────────────────────
+try:
+    if "gemini" in st.secrets:
+        os.environ["GEMINI_API_KEY"] = st.secrets["gemini"]["GEMINI_API_KEY"]
+except Exception:
+    pass
 try:
     if "anthropic" in st.secrets:
         os.environ["ANTHROPIC_API_KEY"] = st.secrets["anthropic"]["ANTHROPIC_API_KEY"]
@@ -86,8 +88,19 @@ st.markdown("""
 def get_df():
     return st.session_state.get("prev_df")
 
-def api_key_ok():
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+def api_key_ok() -> bool:
+    return bool(
+        os.environ.get("GEMINI_API_KEY") or
+        os.environ.get("GOOGLE_API_KEY") or
+        os.environ.get("ANTHROPIC_API_KEY")
+    )
+
+def active_provider() -> str:
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "Gemini"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "Anthropic"
+    return "none"
 
 
 def main():
@@ -97,54 +110,28 @@ def main():
         "tests, and produces evidence-based trading rule recommendations."
     )
 
-    # ── Debug panel — shows path info to diagnose import failures ────────────
+    # ── Agent module check ────────────────────────────────────────────────────
     if not AGENT_AVAILABLE:
         st.error("Could not import agent modules: " + _AGENT_ERR)
-
-        with st.expander("🔍 Debug: file system view (click to expand)", expanded=True):
-            st.markdown("**`__file__`**")
-            st.code(str(Path(__file__).resolve()))
-
-            st.markdown("**`Path.cwd()`**")
-            st.code(str(Path.cwd()))
-
-            st.markdown("**Resolved repo root**")
-            st.code(_repo_root)
-            st.markdown("**`sys.path` (first 8 entries)**")
-            st.code("\n".join(sys.path[:8]))
-
-            st.markdown("**Contents of repo root** (`__file__/../..`)")
-            repo = Path(__file__).resolve().parent.parent
+        with st.expander("Debug: file system view", expanded=True):
+            st.code("__file__: " + str(Path(__file__).resolve()))
+            st.code("repo root: " + _repo_root)
+            st.code("sys.path[:5]:\n" + "\n".join(sys.path[:5]))
+            repo = Path(_repo_root)
             try:
-                contents = sorted([p.name for p in repo.iterdir()])
-                st.code("\n".join(contents))
+                st.code("repo contents:\n" + "\n".join(
+                    sorted(p.name for p in repo.iterdir())
+                ))
             except Exception as ex:
-                st.code("Error listing directory: " + str(ex))
-
-            st.markdown("**Contents of cwd**")
-            try:
-                contents_cwd = sorted([p.name for p in Path.cwd().iterdir()])
-                st.code("\n".join(contents_cwd))
-            except Exception as ex:
-                st.code("Error: " + str(ex))
-
-            st.markdown("**Looking for agent/__init__.py in sys.path**")
-            found = []
-            for p in sys.path:
-                check = Path(p) / "agent" / "__init__.py"
-                if check.exists():
-                    found.append(str(check))
-            st.code("\n".join(found) if found else "NOT FOUND in any sys.path entry")
-
-        st.markdown(
-            "**How to fix:** Make sure these files are uploaded to GitHub "
-            "at the **repo root** (same level as `app.py`):  \n"
-            "`agent/__init__.py`  \n"
-            "`agent/tools.py`  \n"
-            "`agent/memory.py`  \n"
-            "`agent/prompts.py`  \n"
-            "`agent/loop.py`"
-        )
+                st.code("error listing repo: " + str(ex))
+            found = [
+                str(Path(p) / "agent" / "__init__.py")
+                for p in sys.path
+                if (Path(p) / "agent" / "__init__.py").exists()
+            ]
+            st.code("agent/__init__.py found at:\n" + (
+                "\n".join(found) if found else "NOT FOUND"
+            ))
         return
 
     # ── Data check ────────────────────────────────────────────────────────────
@@ -158,18 +145,25 @@ def main():
 
     # ── API key check ─────────────────────────────────────────────────────────
     if not api_key_ok():
-        st.error(
-            "Anthropic API key not found.  \n\n"
-            "Go to: **Streamlit Cloud → your app → Settings → Secrets**  \n\n"
-            "Paste:  \n"
-            "```toml\n"
-            "[anthropic]\n"
-            'ANTHROPIC_API_KEY = "sk-ant-YOUR-KEY-HERE"\n'
-            "```"
+        st.error("No API key found.")
+        st.markdown("Go to **Streamlit Cloud → your app → Settings → Secrets** and paste one of:")
+        st.markdown("**Google Gemini (free tier — recommended):**")
+        st.code("[gemini]\nGEMINI_API_KEY = \"your-key-from-aistudio.google.com\"",
+                language="toml")
+        st.markdown("**Anthropic Claude (paid):**")
+        st.code("[anthropic]\nANTHROPIC_API_KEY = \"sk-ant-...\"",
+                language="toml")
+        st.markdown(
+            "Get a free Gemini key at "
+            "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)"
         )
         return
 
-    st.success(str(len(df)) + " trades loaded · API key present")
+    provider = active_provider()
+    st.success(
+        str(len(df)) + " trades loaded  ·  "
+        + provider + " API key present"
+    )
 
     col_left, col_right = st.columns([2, 1])
 
