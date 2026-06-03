@@ -20,5 +20,14 @@ scipy>=1.10.0          # already there — no change
 statsmodels>=0.14.0    # ADD THIS
 
 # ── AI Agent ─────────────────────────────────────────────────────────────────
-anthropic>=0.40.0
+#anthropic>=0.40.0
+
+# ── AI Agent — Google Gemini (free tier) ─────────────────────────────────────
+google-genai>=1.0.0
+
+# ── AI Agent — Anthropic Claude (optional, paid) ─────────────────────────────
+# anthropic>=0.40.0
+
+
+
 
