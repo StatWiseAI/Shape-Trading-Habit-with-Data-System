@@ -28,7 +28,7 @@ from agent.tools   import get_tool_definitions, execute_tool
 from agent.prompts import build_task_prompt
 from agent.memory  import get_findings_summary
 
-MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+MODEL     = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 MAX_ITER  = 20
 MAX_TOKENS = 4096
 
@@ -119,19 +119,37 @@ def run_agent(
         iteration += 1
         yield {"type": "thinking", "text": f"Agent iteration {iteration}…"}
 
-        try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    tools=tools,
-                    max_output_tokens=MAX_TOKENS,
-                    temperature=0.1,
-                ),
-            )
-        except Exception as e:
-            yield {"type": "error", "message": str(e)}
+        # Retry up to 3 times on rate-limit (429) with backoff
+        response = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        tools=tools,
+                        max_output_tokens=MAX_TOKENS,
+                        temperature=0.1,
+                    ),
+                )
+                break
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    import time
+                    wait = 15 * (attempt + 1)   # 15s, 30s, 45s
+                    yield {"type": "thinking",
+                           "text": f"Rate limit hit — waiting {wait}s before retry {attempt+2}/3…"}
+                    time.sleep(wait)
+                else:
+                    yield {"type": "error", "message": msg}
+                    return
+        if response is None:
+            yield {"type": "error",
+                   "message": "Rate limit: " + str(last_err)}
             return
 
         # ── Parse response parts ──────────────────────────────────────────────
