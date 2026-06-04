@@ -24,7 +24,7 @@ from agent.prompts import build_task_prompt
 from agent.memory  import get_findings_summary
 
 # gemini-1.5-flash-latest is the correct free-tier model name for v1beta API
-MODEL      = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash-latest")
+MODEL      = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_ITER   = 20
 MAX_TOKENS = 4096
 
